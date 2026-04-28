@@ -1,0 +1,537 @@
+# LinkedIn Agent Rules
+
+## ADB Screen Reading
+
+```bash
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+```
+
+Parse XML with:
+```python
+python3 << 'PYEOF'
+import xml.dom.minidom
+dom = xml.dom.minidom.parse('/tmp/screen.xml')
+nodes = dom.getElementsByTagName('node')
+for n in nodes:
+    text = n.getAttribute('text')
+    desc = n.getAttribute('content-desc')
+    bounds = n.getAttribute('bounds')
+    if text or desc:
+        print(f"text='{text}' desc='{desc}' bounds='{bounds}'")
+PYEOF
+```
+
+## Tapping Elements
+
+Extract bounds from XML (format: `[x1,y1][x2,y2]`), calculate center:
+```
+center_x = (x1 + x2) // 2
+center_y = (y1 + y2) // 2
+```
+
+Then tap:
+```bash
+adb shell input tap <center_x> <center_y>
+```
+
+## Posting to LinkedIn - Step by Step
+
+### Step 1: Generate Image (Optional)
+
+Use `generate_gptimage.sh` to create an AI-generated image for your post:
+```bash
+bash /path/to/generate_gptimage.sh "Your prompt for GPT Image 2" 3:2 /tmp/post_image.webp
+```
+
+### Step 2: Push Image to Device (if attaching image)
+```bash
+adb push /tmp/post_image.webp /sdcard/DCIM/Camera/post_image.webp
+adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+  -d file:///sdcard/DCIM/Camera/post_image.webp
+```
+
+### Step 3: Open Post Composer
+```bash
+adb shell input tap 610 2592  # Tap "Post" tab in bottom nav
+sleep 2
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+```
+
+### Step 4: Attach Image (if applicable)
+
+1. Tap the "Photo" button (look for `desc='Photo'` in XML, typically bottom of composer):
+```bash
+adb shell input tap 946 2592  # Example: bounds=[874,2520][1018,2664]
+sleep 3
+```
+
+2. Navigate to image in gallery - tap "Collections" tab, then "Camera" folder:
+```bash
+adb shell input tap 855 918   # Collections tab
+sleep 1
+adb shell input tap 728 1715  # Camera folder
+sleep 2
+```
+
+3. Select the image (first/top image in grid is usually the newest):
+```bash
+adb shell input tap 202 1264  # First image in grid
+sleep 2
+```
+
+4. Tap "Done" to confirm selection:
+```bash
+adb shell input tap 1008 2484
+sleep 2
+```
+
+5. Tap "Next" in image review:
+```bash
+adb shell input tap 1082 206
+sleep 3
+```
+
+### Step 5: Type Post Content
+
+**RECOMMENDED** - Word-by-word with keyevent for spaces (avoids ALL encoding issues):
+```python
+python3 << 'PYEOF'
+import subprocess, time
+
+lines = [
+    "Your post heading",
+    "",
+    "Your post body paragraph one",
+    "",
+    "Your post body paragraph two"
+]
+
+for i, line in enumerate(lines):
+    if line.strip():
+        for word in line.split():
+            subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+            subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)  # space
+            time.sleep(0.12)
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)  # backspace
+    if i < len(lines) - 1:
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '66'], check=True)  # Enter
+        time.sleep(0.3)
+PYEOF
+```
+
+### Step 6: Publish Post
+```bash
+adb shell input tap 1087 194  # Tap "Post" button in top-right
+sleep 4
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+```
+
+### Step 7: Verify Success
+Post is successful if you are returned to the main feed (look for `desc='Home 1 of 5'` or a notification count increase in XML).
+
+## Deleting a Post
+
+1. Tap the three dots (View more options) on the post:
+```bash
+adb shell input tap 1160 338
+sleep 1
+```
+
+2. Look for "Delete" or "Delete post" in the XML, then tap its bounds.
+
+## Liking a Post
+
+1. Dump screen and find reaction button:
+```python
+python3 << 'PYEOF'
+import xml.dom.minidom
+dom = xml.dom.minidom.parse('/tmp/screen.xml')
+nodes = dom.getElementsByTagName('node')
+for n in nodes:
+    desc = n.getAttribute('content-desc')
+    bounds = n.getAttribute('bounds')
+    if 'no reaction' in desc.lower():
+        print(f"UNLIKED: bounds='{bounds}'")
+    elif 'like' in desc.lower() and 'reaction' in desc.lower():
+        print(f"LIKED: bounds='{bounds}'")
+PYEOF
+```
+
+2. Tap the like button center:
+```bash
+adb shell input tap 252 771  # Example: bounds=[204,723][300,819]
+```
+
+## Commenting on a Post
+
+**NOTE**: LinkedIn's comment input is a Compose view. `adb input text` may not work reliably. The send button only appears after text is successfully entered.
+
+### Prerequisites
+Ensure `uiautomator dump` works. If it returns `null root node`, check for crashed accessibility services:
+```bash
+adb shell dumpsys accessibility | grep "Crashed services"
+```
+If a service is crashed, reset:
+```bash
+adb shell settings put secure enabled_accessibility_services ""
+```
+Then restore after:
+```bash
+adb shell settings put secure enabled_accessibility_services "<original_value>"
+```
+
+### Steps
+
+1. **Find posts** in the feed by dumping the XML and searching for Comment buttons:
+```bash
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+python3 << 'PYEOF'
+import xml.dom.minidom
+dom = xml.dom.minidom.parse('/tmp/screen.xml')
+nodes = dom.getElementsByTagName('node')
+for n in nodes:
+    text = n.getAttribute('text')
+    desc = n.getAttribute('content-desc')
+    bounds = n.getAttribute('bounds')
+    if text or desc:
+        print(f"text='{text}' desc='{desc}' bounds='{bounds}'")
+PYEOF
+```
+
+2. **Tap the "Comment" button** on the desired post (calculate center from bounds):
+```bash
+adb shell input tap 264 771  # Example: bounds=[216,723][312,819]
+sleep 2
+```
+
+3. **Tap the comment input field** (look for "Add a comment..." in XML):
+```bash
+adb shell input tap 670 1380  # Example: bounds=[219,1349][1121,1412]
+sleep 1
+```
+
+4. **Type comment** - split by words, type each word literally with delay, use keyevent 62 for space (avoids ALL hex ambiguity issues with `%s`):
+```python
+python3 << 'PYEOF'
+import subprocess, time
+comment = "Great post thanks for sharing"
+for word in comment.split():
+    subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+    subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)  # 62 = space
+    time.sleep(0.1)  # Prevent dropped characters
+# Remove trailing space with backspace
+subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)  # 67 = backspace
+PYEOF
+sleep 1
+```
+
+5. **Tap send** (blue "Comment" button at bottom of sheet):
+```bash
+adb shell input tap 1021 1518  # Example: bounds=[895,1484][1148,1552]
+sleep 2
+```
+
+6. **Verify**: Look for your comment text in the XML output with "now" timestamp:
+```bash
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+python3 -c "import xml.dom.minidom; dom=xml.dom.minidom.parse('/tmp/screen.xml'); [print(n.getAttribute('text')) for n in dom.getElementsByTagName('node') if n.getAttribute('text')]"
+```
+
+## Scrolling Feed
+
+```bash
+adb shell input swipe 610 2000 610 300 800  # Swipe up to scroll down
+sleep 2
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+```
+
+## Common Pitfalls
+
+1. **URL-encoded text appears literally**: `adb shell input text` already URL-encodes. Don't pre-encode with `%20`, `%27`, etc. Pass raw text or use `%s` for spaces only.
+
+2. **Special characters**: Characters like `'`, `"`, `$`, `#`, `?`, `.`, `,`, `-` get mangled. Either:
+   - Strip them entirely (keep alphanumeric + spaces)
+   - Use keyevent codes for each character (slow but accurate)
+   - Use clipboard paste if available
+
+3. **Shell escaping**: When using heredocs (`<< 'HEREDOC'`), single quotes around delimiter prevent variable expansion. Always use this for post content.
+
+4. **Timing**: Always `sleep 1-3` after taps to let the UI update before dumping XML.
+
+5. **Post button disabled**: The Post button (`enabled="false"`) becomes `enabled="true"` only when text is entered. Check this before tapping.
+
+6. **Comment send button**: LinkedIn's comment input may not accept `adb input text` reliably. The send button (right side of comment bar) only appears when text is detected. If text doesn't appear, the send button won't show.
+
+7. **Feed caching**: LinkedIn may show the same posts repeatedly. Use aggressive swipes (`input swipe 610 2200 610 200 1000`) to load new content.
+
+8. **Crashed accessibility services block uiautomator**: If `uiautomator dump` returns `ERROR: null root node returned by UiTestAutomationBridge`, a crashed accessibility service (e.g., Grammarly keyboard) is likely corrupting the bridge. Fix:
+```bash
+# Check crashed services
+adb shell dumpsys accessibility | grep "Crashed services"
+# Reset to clear the crash
+adb shell settings put secure enabled_accessibility_services ""
+# Restore original value later
+adb shell settings put secure enabled_accessibility_services "com.grammarly.android.keyboard/..."
+```
+
+## Key Event Codes Reference
+
+| Key | Code | Key | Code |
+|-----|------|-----|------|
+| Enter | 66 | Space | 62 |
+| Backspace | 67 | Tab | 61 |
+| A-Z | 29-54 | 0-9 | 7-16 |
+| Period | 56 | Comma | 55 |
+| Minus | 69 | Equals | 70 |
+| Apostrophe | 75 | Question | 76 |
+| Shift (hold) | 59/60 | | |
+
+## Posting to X (Twitter) - Step by Step
+
+### Step 1: Open X App
+```bash
+adb shell monkey -p com.twitter.android -c android.intent.category.LAUNCHER 1
+sleep 5
+```
+
+### Step 2: Open Post Composer
+Tap the "+" FAB (floating action button), then tap "Post":
+```bash
+adb shell input tap 1088 2364  # Tap FAB to show menu
+sleep 2
+adb shell input tap 1088 2364  # Tap "Post" option (same bounds)
+sleep 3
+```
+
+Verify composer opened by looking for "What's happening?" placeholder:
+```bash
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+python3 -c "import xml.dom.minidom; dom=xml.dom.minidom.parse('/tmp/screen.xml'); [print(n.getAttribute('text')) for n in dom.getElementsByTagName('node') if 'happening' in n.getAttribute('text').lower()]"
+```
+
+### Step 3: Type Post Content
+Same word-by-word approach as LinkedIn:
+```python
+python3 << 'PYEOF'
+import subprocess, time
+tweet = "Your post text here"
+for word in tweet.split():
+    subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+    subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)  # space
+    time.sleep(0.12)
+subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)  # backspace
+PYEOF
+```
+
+### Step 4: Attach Image (optional)
+```bash
+adb shell input tap 72 1518  # Tap "Photos" icon (leftmost in toolbar)
+sleep 3
+# Navigate gallery same as LinkedIn section above
+```
+
+### Step 5: Publish
+```bash
+adb shell input tap 1073 206  # Tap "POST" button in top-right
+sleep 3
+```
+
+### Step 6: Verify
+Post is successful if returned to the main timeline (look for "posted" or `desc='Home. New items'` in XML).
+
+## Posting to Facebook - Step by Step
+
+### Step 1: Open Facebook App
+```bash
+adb shell am start -n com.facebook.katana/.LoginActivity
+sleep 5
+```
+
+### Step 2: Open Post Composer
+Tap the "Create" button (or the "What's on your mind?" area at top of feed), then tap "Post":
+```bash
+adb shell input tap 878 188  # Tap "Create" button
+sleep 2
+adb shell input tap 932 328  # Tap "Post" option from menu
+sleep 4
+```
+
+### Step 3: Type Post Content
+```python
+python3 << 'PYEOF'
+import subprocess, time
+lines = ["Your post heading", "", "Your post body"]
+for i, line in enumerate(lines):
+    if line.strip():
+        for word in line.split():
+            subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+            subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)
+            time.sleep(0.12)
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)
+    if i < len(lines) - 1:
+        subprocess.run(['adb', 'shell', 'input', 'keyevent', '66'], check=True)
+        time.sleep(0.3)
+PYEOF
+```
+
+### Step 4: Attach Image (optional)
+Tap the "Photo/video" icon, select image, tap "Next", then tap "Post":
+```bash
+# Tap Photo/video icon (bottom of composer)
+adb shell input tap 141 1530  # bounds=[24,1470][258,1590]
+sleep 3
+# Select first image in grid
+adb shell input tap 203 728
+sleep 2
+# Tap "Next" to go to Post settings
+adb shell input tap 1095 188
+sleep 2
+# Tap "Post" to publish
+adb shell input tap 1096 188
+sleep 4
+```
+
+### Step 5: Verify
+Post is successful if returned to the main feed (look for "Just now" timestamp next to your name in XML).
+
+## WhatsApp - Sending Messages and Images
+
+### Step 1: Open WhatsApp
+```bash
+adb shell am start -n com.whatsapp/.Main
+sleep 5
+```
+
+### Step 2: Search for a Contact
+Tap the search bar and type the contact name:
+```bash
+adb shell input tap 610 374  # Tap search bar "Ask Meta AI or Search"
+sleep 1
+adb shell input text "ContactName"
+sleep 2
+```
+
+### Step 3: Open Contact Chat
+Tap on the contact from search results (first matching result):
+```bash
+adb shell input tap 200 689  # Tap first search result
+sleep 2
+```
+
+If contact info opens instead of chat, tap "Message contact":
+```bash
+adb shell input tap 322 1375  # "Message contact" button
+sleep 2
+```
+
+### Step 4: Send a Text Message
+Tap the message input field, type text word-by-word, then tap Send:
+```bash
+adb shell input tap 460 1516  # Tap "Message" input field
+sleep 1
+python3 << 'PYEOF'
+import subprocess, time
+msg = "Your message here"
+for word in msg.split():
+    subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+    subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)
+    time.sleep(0.12)
+subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)
+PYEOF
+adb shell input tap 1135 1517  # Tap "Send" button (voice mic transforms to send when text is typed)
+```
+
+### Step 5: Send an Image
+1. Generate image with AI and push to device:
+```bash
+bash /path/to/generate_gptimage.sh "Your prompt" 3:2 /tmp/image.webp
+adb push /tmp/image.webp /sdcard/DCIM/Camera/image.webp
+adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+  -d file:///sdcard/DCIM/Camera/image.webp
+sleep 2
+```
+
+2. Tap "Attach" button in chat, then tap "Gallery":
+```bash
+adb shell input tap 979 1517  # Tap Attach (paperclip)
+sleep 3
+adb shell input tap 114 2062  # Tap "Gallery" option
+sleep 3
+```
+
+3. Select the image (first/latest image in gallery grid):
+```bash
+adb shell input tap 201 503  # First image in Recents grid
+sleep 2
+```
+
+4. Add caption (optional) and send:
+```bash
+adb shell input tap 556 2568  # Tap caption field
+sleep 1
+python3 << 'PYEOF'
+import subprocess, time
+caption = "Your caption here"
+for word in caption.split():
+    subprocess.run(['adb', 'shell', 'input', 'text', word], check=True)
+    subprocess.run(['adb', 'shell', 'input', 'keyevent', '62'], check=True)
+    time.sleep(0.12)
+subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True)
+PYEOF
+adb shell input tap 1124 2568  # Tap "Send 1 media" button
+sleep 3
+```
+
+### Step 6: Check for Replies
+Dump the chat and look for left-aligned messages (received):
+```bash
+adb shell uiautomator dump /sdcard/screen.xml && adb pull /sdcard/screen.xml /tmp/screen.xml
+python3 << 'PYEOF'
+import xml.dom.minidom
+dom = xml.dom.minidom.parse('/tmp/screen.xml')
+for n in dom.getElementsByTagName('node'):
+    text = n.getAttribute('text')
+    bounds = n.getAttribute('bounds')
+    if text and len(text) > 2 and 'pm' not in text and 'am' not in text:
+        x = int(bounds.split(',')[0].replace('[',''))
+        side = "Contact" if x < 100 else "You"
+        print(f"  {side}: '{text}'")
+PYEOF
+```
+
+### Step 7: Reply to Messages
+Use the same text input approach as Step 4 to type and send replies.
+
+## Screen Dimensions
+
+Device from XML: `1220x2712`
+- Top bar: y=122 to y=266
+- Bottom nav: y=2517 to y=2712
+- Post button: ~[991,122][1184,266] -> tap 1087, 194
+- Post tab: ~[488,2520][731,2664] -> tap 610, 2592
+
+## One-Shot Cross-Post Script
+
+Use `post.sh` to post the same content to LinkedIn + Facebook + X in one command:
+
+```bash
+# Text-only post
+./post.sh "Your post content here"
+
+# Multi-line post
+./post.sh -c "Line one
+
+Line two
+
+Line three"
+
+# Post with images
+./post.sh "Post text" /tmp/image1.jpg /tmp/image2.jpg
+
+# Multi-line with images
+./post.sh -c "Heading
+
+Body paragraph" /tmp/image.jpg
+```
+
+The script handles: pushing images to device, opening each app, typing content, attaching images, and publishing. Edit `post.sh` to enable/disable specific platforms.
