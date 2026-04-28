@@ -107,19 +107,27 @@ post_linkedin() {
 
   # Attach images
   if [[ ${#IMAGES[@]} -gt 0 ]]; then
-    adb shell input tap 946 2592  # Photo button
+    adb shell input tap 946 1530  # Photo button (composer bottom, NOT bottom nav)
     sleep 3
-    # Select first N images (top row)
-    for i in $(seq 1 ${#IMAGES[@]}); do
-      case $i in
-        1) adb shell input tap 202 1270 ;;
-        2) adb shell input tap 610 1270 ;;
-        3) adb shell input tap 1018 1270 ;;
-        4) adb shell input tap 202 1678 ;;
-      esac
-      sleep 0.3
-    done
-    sleep 1
+    # Find FIRST image dynamically via XML
+    adb shell uiautomator dump /sdcard/screen.xml > /dev/null 2>&1
+    adb pull /sdcard/screen.xml /tmp/screen.xml > /dev/null 2>&1
+    IFS=' ' read -r IX IY <<< "$(python3 -c "
+import xml.dom.minidom, re
+dom = xml.dom.minidom.parse('/tmp/screen.xml')
+for n in dom.getElementsByTagName('node'):
+    d = n.getAttribute('content-desc')
+    b = n.getAttribute('bounds')
+    if 'Photo taken on' in d:
+        m = re.search(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', b)
+        if m:
+            print((int(m.group(1))+int(m.group(3)))//2, (int(m.group(2))+int(m.group(4)))//2)
+            break
+")"
+    if [[ -n "$IX" ]]; then
+      adb shell input tap "$IX" "$IY"
+      sleep 1
+    fi
     adb shell input tap 1008 2484  # Done
     sleep 3
     adb shell input tap 1082 206   # Next
