@@ -2,8 +2,9 @@
 set -euo pipefail
 
 MAX_POSTS=${1:-5}
+API_KEY="${OPENROUTER_API_KEY:-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}"
 
-echo "Starting LinkedIn auto-commenter for $MAX_POSTS posts..."
+echo "Starting LinkedIn AI auto-commenter for $MAX_POSTS posts..."
 echo "Press Ctrl+C to stop anytime."
 echo ""
 
@@ -13,14 +14,16 @@ for i in $(seq 1 "$MAX_POSTS"); do
   adb shell uiautomator dump /sdcard/screen.xml > /dev/null 2>&1
   adb pull /sdcard/screen.xml /tmp/screen.xml > /dev/null 2>&1
 
-  RESULT=$(python3 << 'PYEOF'
-import xml.dom.minidom, re, subprocess, time
+  RESULT=$(python3 << PYEOF
+import xml.dom.minidom, re, subprocess, time, json, urllib.request
 
 dom = xml.dom.minidom.parse('/tmp/screen.xml')
 nodes = dom.getElementsByTagName('node')
 
-# Find post text and comment buttons
-posts = []
+# Extract post context: author + headline + post text
+post_author = ""
+post_headline = ""
+post_body = ""
 comment_btn = None
 
 for n in nodes:
@@ -36,68 +39,89 @@ for n in nodes:
             if 350 < cx < 600:
                 comment_btn = (cx, cy)
 
-    if text and len(text) > 30:
-        posts.append(text[:200])
+    if text:
+        if not post_author and len(text) < 50 and not text.startswith("http"):
+            post_author = text
+        elif len(text) > 30 and len(text) < 200:
+            post_body = text
+        elif len(text) >= 200:
+            post_body = text[:500]
 
 if not comment_btn:
     print("NO_COMMENT_BTN")
 else:
-    # Pick a comment based on post content
-    post_text = " ".join(posts).lower()
+    context = f"Author: {post_author}\nPost: {post_body[:300]}"
 
-    if any(w in post_text for w in ["ai", "artificial intelligence", "machine learning", "llm", "gpt", "chatgpt", "openai", "model"]):
-        comment = "Great insights on AI. The pace of innovation right now is incredible, and posts like this help make sense of it all."
-    elif any(w in post_text for w in ["startup", "founder", "fundraising", "venture", "investor", "saas", "mvp"]):
-        comment = "Love this perspective. The startup journey is all about execution over ideas, and this captures it well."
-    elif any(w in post_text for w in ["developer", "coding", "software", "engineer", "programming", "code", "build"]):
-        comment = "This resonates a lot. Building in public and shipping fast matters more than chasing perfection."
-    elif any(w in post_text for w in ["marketing", "growth", "sales", "customer", "content", "social media"]):
-        comment = "Such a valuable take. The best growth strategies come from understanding people first, not just tactics."
-    elif any(w in post_text for w in ["career", "job", "hiring", "interview", "layoff", "resign", "promot"]):
-        comment = "Really helpful advice. The job market keeps evolving, and adaptability is the real superpower."
-    elif any(w in post_text for w in ["design", "ux", "ui", "user experience", "product"]):
-        comment = "Well said. Great design is invisible, but its impact is undeniable."
-    elif any(w in post_text for w in ["focus", "productivity", "mental", "health", "meditation", "mindfulness"]):
-        comment = "Needed to hear this. Protecting your focus is the most underrated productivity hack."
-    elif any(w in post_text for w in ["leadership", "management", "team", "culture", "hiring"]):
-        comment = "Strong leadership is rare. Thanks for sharing what actually works in building great teams."
-    elif any(w in post_text for w in ["money", "finance", "invest", "passive", "income", "earning"]):
-        comment = "Appreciate you sharing this. Financial literacy is something more people need to talk about."
-    elif any(w in post_text for w in ["freelance", "freelancer", "remote", "work from"]):
-        comment = "The future of work is freelance and remote. Thanks for sharing your experience on this."
-    else:
-        comment = "Great post. Thanks for sharing your thoughts on this."
+    api_key = "$API_KEY"
+    prompt = f"""You are replying to a LinkedIn post. Here is the post:
 
-    print(f"BTN:{comment_btn[0]},{comment_btn[1]}")
-    print(f"COMMENT:{comment}")
+{context}
+
+Write ONE short reply (10-20 words) that sounds like a real person wrote it. Be natural and specific to this post content. No hashtags. No emojis. Just the reply text."""
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=json.dumps({
+            "model": "openrouter/free",
+            "messages": [
+                {"role": "user", "content": f"How many r's are in the word 'strawberry'?"},
+                {"role": "assistant", "content": "There are 3 r's in strawberry."},
+                {"role": "user", "content": prompt}
+            ],
+            "reasoning": {"enabled": True}
+        }).encode(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+    )
+
+    try:
+        resp = json.loads(urllib.request.urlopen(req, timeout=20).read())
+        comment = resp['choices'][0]['message']['content'].strip().strip('"').strip("'")
+        words = comment.split()
+        if len(words) > 25:
+            comment = " ".join(words[:25])
+        print(f"BTN:{comment_btn[0]},{comment_btn[1]}")
+        print(f"COMMENT:{comment}")
+    except Exception as e:
+        print(f"API_ERROR:{e}")
+        print(f"BTN:{comment_btn[0]},{comment_btn[1]}")
+        print("COMMENT:Great post, thanks for sharing!")
 PYEOF
 )
 
   if [[ "$RESULT" == "NO_COMMENT_BTN" ]]; then
     echo "Scroll $i: No comment button found, scrolling..."
-    adb shell input swipe 610 2200 610 300 1000
+    adb shell input swipe 610 2400 610 200 1200
     sleep 3
     continue
   fi
 
-  BTN_X=$(echo "$RESULT" | grep "^BTN:" | cut -d: -f2 | cut -d, -f1)
-  BTN_Y=$(echo "$RESULT" | grep "^BTN:" | cut -d: -f2 | cut -d, -f2)
-  COMMENT_TEXT=$(echo "$RESULT" | grep "^COMMENT:" | cut -d: -f2-)
+  if echo "$RESULT" | grep -q "^API_ERROR"; then
+    BTN_X=$(echo "$RESULT" | sed -n 's/^BTN:\([0-9]*\),\([0-9]*\)/\1/p')
+    BTN_Y=$(echo "$RESULT" | sed -n 's/^BTN:\([0-9]*\),\([0-9]*\)/\2/p')
+    ERROR_MSG=$(echo "$RESULT" | sed -n 's/^API_ERROR:\(.*\)/\1/p')
+    COMMENT_TEXT="Great post, thanks for sharing!"
+    echo "Scroll $i: API error ($ERROR_MSG), using fallback"
+  else
+    BTN_X=$(echo "$RESULT" | grep "^BTN:" | cut -d: -f2 | cut -d, -f1)
+    BTN_Y=$(echo "$RESULT" | grep "^BTN:" | cut -d: -f2 | cut -d, -f2)
+    COMMENT_TEXT=$(echo "$RESULT" | grep "^COMMENT:" | cut -d: -f2-)
+  fi
 
-  if [[ -z "$BTN_X" || -z "$BTN_Y" || -z "$COMMENT_TEXT" ]]; then
+  if [[ -z "$BTN_X" || -z "$BTN_Y" ]]; then
     echo "Scroll $i: Failed to parse, scrolling..."
-    adb shell input swipe 610 2200 610 300 1000
+    adb shell input swipe 610 2400 610 200 1200
     sleep 3
     continue
   fi
 
-  echo "Scroll $i: Commenting on post..."
+  echo "Scroll $i: \"$COMMENT_TEXT\""
 
-  # Tap Comment button
   adb shell input tap "$BTN_X" "$BTN_Y"
   sleep 3
 
-  # Check if comment input appeared
   adb shell uiautomator dump /sdcard/screen.xml > /dev/null 2>&1
   adb pull /sdcard/screen.xml /tmp/screen.xml > /dev/null 2>&1
 
@@ -111,15 +135,14 @@ for n in dom.getElementsByTagName('node'):
 ")
 
   if [[ "$HAS_INPUT" != "YES" ]]; then
-    echo "  Comment sheet did not open, skipping..."
+    echo "  Sheet did not open, skipping..."
     adb shell input keyevent 4
     sleep 2
-    adb shell input swipe 610 2200 610 300 1000
+    adb shell input swipe 610 2400 610 200 1200
     sleep 3
     continue
   fi
 
-  # Type comment word by word
   python3 << PYEOF
 import subprocess, time
 comment = """$COMMENT_TEXT"""
@@ -131,10 +154,8 @@ for word in comment.split():
         time.sleep(0.1)
 subprocess.run(['adb', 'shell', 'input', 'keyevent', '67'], check=True, capture_output=True)
 PYEOF
-
   sleep 1
 
-  # Find and tap send button
   adb shell uiautomator dump /sdcard/screen.xml > /dev/null 2>&1
   adb pull /sdcard/screen.xml /tmp/screen.xml > /dev/null 2>&1
 
@@ -156,17 +177,16 @@ for n in dom.getElementsByTagName('node'):
     adb shell input tap "$SEND_X" "$SEND_Y"
     sleep 3
     COMMENTED=$((COMMENTED + 1))
-    echo "  Comment sent!"
+    echo "  Sent!"
   else
     echo "  Send button not found"
     adb shell input keyevent 4
     sleep 2
   fi
 
-  # Go back to feed
   adb shell input keyevent 4
   sleep 2
-  adb shell input swipe 610 2200 610 300 1000
+  adb shell input swipe 610 2400 610 200 1200
   sleep 3
 done
 
